@@ -1,4 +1,4 @@
-# The Bot Range (TBR) - Agent-Ready Starter Kit
+# The Bot Range (TBR) - Bot Development Kit (BDK)
 
 The public companion repository for **[The Bot Range (TBR)](https://thebotrange.com)**, a text- and REST API-driven extraction strategy game on an expandable world grid.
 
