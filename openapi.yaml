@@ -1,0 +1,1826 @@
+openapi: 3.0.3
+info:
+  title: The Bot Range (TBR) Game API
+  description: |
+    REST API for interacting with the TBR Strategy Grid.
+    All gameplay endpoints require authentication using a Bearer token.
+  version: 1.0.0
+servers:
+  - url: http://localhost:4000/api
+    description: Local development server
+paths:
+  /game/state:
+    get:
+      summary: Retrieve Game State
+      description: Returns the player's profile data, current tile scanning results, action rate-limiter capacity, and zone multipliers.
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: State successfully retrieved.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GameStateResponse'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
+        '400':
+          $ref: '#/components/responses/RespawningError'
+        '429':
+          $ref: '#/components/responses/RateLimitedError'
+
+  /game/leaderboard:
+    get:
+      summary: Retrieve Thematic Role Leaderboards
+      description: Returns rankings of Operators and Units across six distinct thematic roles (omni, vanguard, pilot, archaeologist, mechanic, fleet). Supports windowed pagination. Does not consume Action Tokens.
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: query
+          name: role
+          schema:
+            type: string
+            enum: [omni, vanguard, pilot, archaeologist, mechanic, fleet]
+            default: omni
+          description: Leaderboard role category. Defaults to 'omni'.
+        - in: query
+          name: page
+          schema:
+            type: integer
+            default: 1
+            minimum: 1
+          description: Page number for windowed results.
+        - in: query
+          name: limit
+          schema:
+            type: integer
+            default: 25
+            minimum: 1
+            maximum: 100
+          description: Maximum number of players returned per page.
+      responses:
+        '200':
+          description: Leaderboard successfully retrieved.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  role:
+                    type: string
+                    example: "omni"
+                  leaderboard:
+                    type: array
+                    items:
+                      type: object
+                  pagination:
+                    $ref: '#/components/schemas/PaginationInfo'
+        '400':
+          description: Invalid role specified.
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
+
+  /game/move:
+    post:
+      summary: Relocate Player
+      description: Relocate player one tile in any of the 8 cardinal/diagonal directions. Requires `zone_change: true` when crossing zone borders.
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - direction
+              properties:
+                direction:
+                  type: string
+                  description: The target direction.
+                  enum: [n, ne, e, se, s, sw, w, nw, N, NE, E, SE, S, SW, W, NW]
+                zone_change:
+                  type: boolean
+                  description: Set to true if you are crossing zone boundaries.
+                  default: false
+      responses:
+        '200':
+          description: Successfully relocated.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MoveResponse'
+        '400':
+          description: Bad request (invalid direction, edge of world, or zone boundary crossing confirmation required).
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error:
+                    type: string
+                    example: "This move would cross a zone boundary. Set the 'zone_change' parameter to true to confirm."
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
+        '429':
+          $ref: '#/components/responses/RateLimitedError'
+        '502':
+          $ref: '#/components/responses/SignalInterferenceError'
+
+  /game/loot:
+    post:
+      summary: Loot Current Tile
+      description: Collects all native resources and enemy drops located on your current tile, adding them to your carried inventory.
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: Looting succeeded.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/GameStateResponse'
+                  - type: object
+                    properties:
+                      looted:
+                        type: array
+                        items:
+                          $ref: '#/components/schemas/LootedResource'
+        '400':
+          description: Looting blocked by active hostiles on the tile.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/GameStateResponse'
+                  - type: object
+                    properties:
+                      error:
+                        type: string
+                        example: "tile_blocked_by_agro_enemy"
+                      message:
+                        type: string
+                        example: "Looting failed. Tile contains an aggressive enemy."
+                      combat_log:
+                        type: array
+                        items:
+                          type: string
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
+        '429':
+          $ref: '#/components/responses/RateLimitedError'
+        '502':
+          $ref: '#/components/responses/SignalInterferenceError'
+
+  /game/attack:
+    post:
+      summary: Attack Hostile
+      description: Attack an active hostile (by `enemy_id`) on your tile. Supports targeting standard enemies, sub-bosses, mega-bosses, or escort adds in multi-enemy encounters.
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                enemy_id:
+                  type: string
+                  description: ID of the enemy drone or hostile to attack.
+                heavy:
+                  type: boolean
+                  description: Set to true to execute a Heavy Strike (costs 10 EN).
+                  default: false
+      responses:
+        '200':
+          description: Combat turn successfully processed.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/GameStateResponse'
+                  - type: object
+                    properties:
+                      combat_log:
+                        type: array
+                        items:
+                          type: string
+        '400':
+          description: Attack failed (e.g. insufficient energy).
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error:
+                    type: string
+                    example: "Insufficient energy (EN) for heavy strike."
+        '404':
+          description: Target not found on the current tile.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error:
+                    type: string
+                    example: "Enemy with ID 'drone_abc' not found on this tile."
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
+        '429':
+          $ref: '#/components/responses/RateLimitedError'
+        '502':
+          $ref: '#/components/responses/SignalInterferenceError'
+
+  /game/bot/rename:
+    patch:
+      summary: Rename Bot Handle (Canonical)
+      description: Renames the active bot handle. Requires 3-24 characters (letters, numbers, underscores, and dashes). Returns updated bot metadata. Supported on both PATCH and POST.
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - name
+              properties:
+                name:
+                  type: string
+                  description: New bot handle name.
+                  example: "MechaApex_42"
+      responses:
+        '200':
+          description: Bot handle updated successfully.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: "ok"
+                  message:
+                    type: string
+                    example: "Player handle renamed successfully."
+                  bot:
+                    type: object
+                    properties:
+                      id:
+                        type: integer
+                      name:
+                        type: string
+                      username:
+                        type: string
+                  player:
+                    type: object
+                    properties:
+                      id:
+                        type: integer
+                      name:
+                        type: string
+                      username:
+                        type: string
+        '400':
+          description: Invalid handle length or format.
+        '409':
+          description: Handle is already taken by another bot.
+    post:
+      summary: Rename Bot Handle (POST Alias)
+      description: POST alias for renaming bot handle.
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - name
+              properties:
+                name:
+                  type: string
+                  description: New bot handle name.
+                  example: "MechaApex_42"
+      responses:
+        '200':
+          description: Bot handle updated successfully.
+
+  /game/util:
+    post:
+      summary: Use Active Utility Item
+      description: Activates your equipped active utility tool (Aux Shield or Mag Harpoon) by posting the item-specific parameters.
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                utility:
+                  type: string
+                  description: The name of the utility item to use. Must match your equipped utility.
+                  enum: [aux_shield, mag_harpoon, env_scanner]
+                target_id:
+                  type: string
+                  description: Target enemy ID (required only for Mag Harpoon).
+      responses:
+        '200':
+          description: Utility activated successfully.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/GameStateResponse'
+                  - type: object
+                    properties:
+                      combat_log:
+                        type: array
+                        items:
+                          type: string
+        '400':
+          description: Activation failed (utility mismatch, passive utility, insufficient energy, or respawning).
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error:
+                    type: string
+                    example: "Insufficient energy. aux_shield requires 15 EN."
+        '404':
+          description: Target enemy not found on this tile (for Mag Harpoon).
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error:
+                    type: string
+                    example: "Target enemy 'drone_xyz' not found on this tile."
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
+        '429':
+          $ref: '#/components/responses/RateLimitedError'
+        '502':
+          $ref: '#/components/responses/SignalInterferenceError'
+
+  /game/excavate:
+    post:
+      summary: Excavate Vault Artifacts
+      description: Performs an excavation attempt on the current tile to discover and unearth hidden Vault artifacts.
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: Excavation performed successfully.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/GameStateResponse'
+                  - type: object
+                    properties:
+                      combat_log:
+                        type: array
+                        items:
+                          type: string
+        '400':
+          description: Player is respawning or despawned.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error:
+                    type: string
+                    example: "respawning"
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
+        '429':
+          $ref: '#/components/responses/RateLimitedError'
+        '502':
+          $ref: '#/components/responses/SignalInterferenceError'
+
+  /game/clear:
+    post:
+      summary: Clear Crystalline Terrain
+      description: Clears crystalline terrain depth on the unit's current tile by 10%. Consumes 1 Action Token and 1 EN.
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: Terrain cleared successfully.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: "ok"
+                  tile:
+                    type: object
+                    properties:
+                      zone_x:
+                        type: integer
+                      zone_y:
+                        type: integer
+                      tile_x:
+                        type: integer
+                      tile_y:
+                        type: integer
+                      crystal_depth:
+                        type: integer
+                        example: 75
+                      terrain_name:
+                        type: string
+                        example: "Crystalline Veins"
+                  player:
+                    type: object
+                    properties:
+                      en:
+                        type: integer
+                        example: 45
+                      max_en:
+                        type: integer
+                        example: 50
+                  action_logs:
+                    type: array
+                    items:
+                      type: string
+        '400':
+          description: Insufficient energy or player is despawned.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error:
+                    type: string
+                    example: "insufficient_energy"
+                  message:
+                    type: string
+                    example: "Unit requires at least 1 EN to clear terrain."
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
+        '429':
+          $ref: '#/components/responses/RateLimitedError'
+        '502':
+          $ref: '#/components/responses/SignalInterferenceError'
+
+  /game/artifacts:
+    get:
+      summary: Get Player & Vault Artifact Collections
+      description: Returns the player's carried artifacts, banked artifacts, and active Vault zone coordinates with pagination support for banked items.
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: query
+          name: page
+          schema:
+            type: integer
+            default: 1
+            minimum: 1
+          description: Page number for banked artifacts.
+        - in: query
+          name: limit
+          schema:
+            type: integer
+            default: 50
+            minimum: 1
+            maximum: 100
+          description: Items per page for banked artifacts.
+      responses:
+        '200':
+          description: Artifact collection details retrieved successfully.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  carried_artifacts:
+                    type: array
+                    items:
+                      type: object
+                  banked_artifacts:
+                    type: array
+                    items:
+                      type: object
+                  active_vault_zone:
+                    type: object
+                    properties:
+                      zone_x:
+                        type: integer
+                      zone_y:
+                        type: integer
+                  pagination:
+                    $ref: '#/components/schemas/PaginationInfo'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
+
+
+  /game/extract:
+    post:
+      summary: Extract Player
+      description: Extract player banking all carried resources into their permanent bank, restoring HP, and respawning them at the outer edge of the world. Must occupy an extraction zone in Ring 0 perimeter to trigger.
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: Successful extraction.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GameStateResponse'
+        '400':
+          description: Extraction failed (not in extraction zone, or player is already respawning).
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error:
+                    type: string
+                    example: "Extraction failed. Player must be in an extraction zone [[4, 4], [4, 5], [5, 4], [5, 5]] to extract."
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
+        '429':
+          $ref: '#/components/responses/RateLimitedError'
+
+  /game/spawn:
+    post:
+      summary: Spawn Player Unit
+      description: Manually deploy and spawn a despawned player unit into the world grid. Optionally accepts a custom loadout configuration.
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                loadout:
+                  type: object
+                  properties:
+                    weapon:
+                      type: string
+                      enum: [plasma_beam, vibro_blade, kinetic_cannon, shock_lance]
+                    armor:
+                      type: string
+                      enum: [bonded_carbon, integrated_ceramic, fused_plastanium, crystallized_amalgam]
+                    utility:
+                      type: string
+                      enum: [laz_excavator, aux_shield, mag_harpoon, env_scanner]
+                    coprocessor_mod:
+                      type: string
+                      nullable: true
+                      enum: [ap_recirculator, vector_sensor, resonance_probe, nanite_bus, kinetic_vrm, reactive_armor_t2, plasma_drill_t2, quantum_processor, subspace_turbine_t3, aegis_field_t3]
+                      description: Optional fabricated Coprocessor Module ID to slot on spawn.
+      responses:
+        '200':
+          description: Player successfully deployed and spawned.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GameStateResponse'
+        '400':
+          description: Deployment failed (already spawned, or respawning cooldown active).
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
+
+  /game/loadout:
+    post:
+      summary: Update Default Loadout Configuration
+      description: Configure player's default starting gear. Can only be adjusted while the player is currently despawned.
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - loadout
+              properties:
+                loadout:
+                  type: object
+                  required:
+                    - weapon
+                    - armor
+                    - utility
+                  properties:
+                    weapon:
+                      type: string
+                      enum: [plasma_beam, vibro_blade, kinetic_cannon, shock_lance]
+                    armor:
+                      type: string
+                      enum: [bonded_carbon, integrated_ceramic, fused_plastanium, crystallized_amalgam]
+                    utility:
+                      type: string
+                      enum: [laz_excavator, aux_shield, mag_harpoon, env_scanner]
+                    coprocessor_mod:
+                      type: string
+                      nullable: true
+                      enum: [ap_recirculator, vector_sensor, resonance_probe, nanite_bus, kinetic_vrm, reactive_armor_t2, plasma_drill_t2, quantum_processor, subspace_turbine_t3, aegis_field_t3]
+                      description: Optional default Coprocessor Module ID.
+      responses:
+        '200':
+          description: Loadout configuration updated successfully.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GameStateResponse'
+        '400':
+          description: Update failed (player is active/spawned).
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
+
+  /game/fabricate:
+    post:
+      summary: Fabricate Module or Ark Component
+      description: Fabricates an unlocked Coprocessor Module (`mod_id`) or an Ark Rocket Component (`component_id` and optional `quantity`) using banked resources from database storage.
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                mod_id:
+                  type: string
+                  description: ID of unlocked Coprocessor Module to craft.
+                  example: ap_recirculator
+                component_id:
+                  type: string
+                  description: ID of Ark component to craft (thruster_cluster, guidance_computer, fuel_cell, life_support, solar_array, science_lab, heavy_plating).
+                  example: thruster_cluster
+                quantity:
+                  type: integer
+                  description: Quantity of Ark components to fabricate (defaults to 1).
+                  example: 1
+      responses:
+        '200':
+          description: Module fabricated successfully.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                  module:
+                    type: object
+                  player:
+                    type: object
+        '400':
+          description: Module is locked or insufficient resources.
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
+
+  /game/modules:
+    get:
+      summary: List Coprocessor Modules & Unlocked Schematics
+      description: Retrieves full registry of Coprocessor Modules alongside player's unlocked and fabricated modules.
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: Module registry and player schematic telemetry.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  modules:
+                    type: array
+                    items:
+                      type: object
+                  unlocked_mods:
+                    type: array
+                    items:
+                      type: string
+                  fabricated_mods:
+                    type: array
+                    items:
+                      type: string
+                  equipped_coprocessor:
+                    type: string
+                    nullable: true
+
+  /game/ark:
+    get:
+      summary: Query Active Ark Payload Telemetry
+      description: Retrieves status, zone/tile landing location, 1,000,000 credit construction progress, installed components, boss threat, and paginated loaded payload artifacts. Costs 1 Action Token.
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: query
+          name: page
+          schema:
+            type: integer
+            default: 1
+            minimum: 1
+          description: Page number for loaded payload artifacts gallery.
+        - in: query
+          name: limit
+          schema:
+            type: integer
+            default: 50
+            minimum: 1
+            maximum: 100
+          description: Maximum items per page for loaded payload artifacts gallery.
+      responses:
+        '200':
+          description: Ark telemetry data payload.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ark:
+                    type: object
+                    properties:
+                      ark_id:
+                        type: string
+                      status:
+                        type: string
+                      zone:
+                        type: array
+                        items:
+                          type: integer
+                      tile:
+                        type: array
+                        items:
+                          type: integer
+                      hp:
+                        type: integer
+                      max_hp:
+                        type: integer
+                      construction:
+                        type: object
+                        properties:
+                          target_credits:
+                            type: integer
+                          current_credits:
+                            type: integer
+                          progress_percentage:
+                            type: number
+                          installed_components:
+                            type: object
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
+        '429':
+          $ref: '#/components/responses/RateLimitedError'
+
+  /game/ark/install:
+    post:
+      summary: Install Carried Ark Components onto Rocket Core
+      description: Installs specified or ALL carried Ark components from bot inventory onto under-construction Ark structure while standing on the Ark tile. Costs 1 Action Token.
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                quantity:
+                  type: string
+                  example: all
+                component_id:
+                  type: string
+                  example: ark_internal_frame
+      responses:
+        '200':
+          description: Components installed successfully onto Ark structure.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                  message:
+                    type: string
+                  installed_components:
+                    type: object
+                  total_effective_credits_added:
+                    type: integer
+                  ark_current_credits:
+                    type: integer
+        '400':
+          description: Installation failed (not on Ark tile, no components, or Ark not under construction).
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
+        '429':
+          $ref: '#/components/responses/RateLimitedError'
+
+  /game/ark/load:
+    post:
+      summary: Load Banked Artifact into Completed Ark Payload
+      description: Loads specified banked artifact (`artifact_id` and optional `quantity`) from player's personal collection into the completed Ark payload while standing on the Ark tile during the 24-hour launch window (`ready_for_launch` status). Costs 1 Action Token (not refunded on failure).
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - artifact_id
+              properties:
+                artifact_id:
+                  type: string
+                  example: nga_art_101
+                quantity:
+                  type: integer
+                  example: 1
+      responses:
+        '200':
+          description: Artifact loaded into Ark payload successfully.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                  message:
+                    type: string
+                  loaded_artifact_id:
+                    type: string
+                  quantity_loaded:
+                    type: integer
+                  player:
+                    type: object
+        '400':
+          description: Loading failed (not on Ark tile, Ark not ready for launch, or artifact not found). Costs 1 Action Token.
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
+        '429':
+          $ref: '#/components/responses/RateLimitedError'
+
+  /game/operator:
+    get:
+      summary: Retrieve Operator Character Sheet & Skill Matrix
+      description: Returns the account-wide Operator dossier, computed dynamic title, lifetime accomplishments, all 4 skill lines (XP, level, SP, escalating Mastery Gate progress, and full node catalogs with `unlockable` flags), and unified `active_modifiers`. Costs 0 Action Tokens.
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: Operator Character Sheet retrieved successfully.
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - operator
+                properties:
+                  operator:
+                    $ref: '#/components/schemas/OperatorSheet'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
+    patch:
+      summary: Update Operator Dossier
+      description: Updates the Operator's editable `callsign`, `origin`, or `bio`. Costs 0 Action Tokens.
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateOperatorRequest'
+      responses:
+        '200':
+          description: Operator dossier updated successfully.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: "ok"
+                  message:
+                    type: string
+                    example: "Operator dossier updated successfully."
+                  operator:
+                    $ref: '#/components/schemas/OperatorSheet'
+        '400':
+          description: Validation error (invalid callsign format/profanity, unknown origin, or bio > 280 chars).
+        '409':
+          description: Callsign is already in use by another Operator.
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
+    post:
+      summary: Update Operator Dossier (POST alias)
+      description: Alias for `PATCH /game/operator` updating `callsign`, `origin`, or `bio`. Costs 0 Action Tokens.
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateOperatorRequest'
+      responses:
+        '200':
+          description: Operator dossier updated successfully.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: "ok"
+                  message:
+                    type: string
+                  operator:
+                    $ref: '#/components/schemas/OperatorSheet'
+        '400':
+          description: Validation error.
+        '409':
+          description: Callsign conflict.
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
+
+  /game/operator/skills/unlock:
+    post:
+      summary: Allocate 1 Skill Point to an Operator Skill Node
+      description: Validates level gates, prerequisites, and Mastery status, then spends 1 SP from the node's skill line to advance `skill_id` by 1 rank. Costs 0 Action Tokens.
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - skill_id
+              properties:
+                skill_id:
+                  type: string
+                  example: "van_ballistics"
+      responses:
+        '200':
+          description: Skill node rank unlocked successfully.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: "ok"
+                  message:
+                    type: string
+                  operator:
+                    $ref: '#/components/schemas/OperatorSheet'
+        '400':
+          description: Unlock rejected (`skill_not_found`, `insufficient_sp`, `level_locked`, `prereq_locked`, `mastery_locked`, or `already_max_rank`).
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
+
+  /game/operator/mastery/unlock:
+    post:
+      summary: Claim Skill Line Mastery Breakthrough
+      description: Validates Skill Line Level 8 and the active Mastery Slot's accomplishment threshold (`1x / 3x / 6x / 10x`), then unlocks Levels 9-15 and Tiers 3-4 for `line`. Costs 0 Action Tokens.
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - line
+              properties:
+                line:
+                  type: string
+                  enum: [vanguard, pilot, archaeologist, mechanic]
+                  example: "vanguard"
+      responses:
+        '200':
+          description: Mastery Breakthrough unlocked successfully.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: "ok"
+                  message:
+                    type: string
+                  operator:
+                    $ref: '#/components/schemas/OperatorSheet'
+        '400':
+          description: Mastery claim rejected (`level_below_mastery_gate`, `accomplishments_incomplete`, `already_mastered`, or `invalid_skill_line`).
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
+
+  /game/operator/skills/respec:
+    post:
+      summary: Respec Operator Skill Line (and Optionally Release Mastery Slot)
+      description: Refunds all allocated SP in `line` while preserving earned XP and lifetime accomplishments. Free up to Level 5; deducts banked `scrap`/`copper` at Level 6+ and `+5 gold` when `release_mastery` is `true` on a mastered line. Costs 0 Action Tokens.
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - line
+              properties:
+                line:
+                  type: string
+                  enum: [vanguard, pilot, archaeologist, mechanic]
+                  example: "vanguard"
+                release_mastery:
+                  type: boolean
+                  default: false
+                  example: false
+      responses:
+        '200':
+          description: Skill line respecced successfully.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: "ok"
+                  message:
+                    type: string
+                  operator:
+                    $ref: '#/components/schemas/OperatorSheet'
+                  banked_resources:
+                    type: object
+                    additionalProperties:
+                      type: integer
+        '400':
+          description: Respec failed (`nothing_to_respec`, `insufficient_resources`, or `invalid_skill_line`).
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
+
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      description: Enter your active API Key token.
+
+  responses:
+    UnauthorizedError:
+      description: Authentication failed due to missing or invalid token.
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              error:
+                type: string
+                example: "Unauthorized"
+    RateLimitedError:
+      description: Rate limit token bucket is empty.
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              error:
+                type: string
+                example: "rate_limited"
+              message:
+                type: string
+                example: "No action tokens remaining. Refill in 12 seconds."
+              seconds_to_wait:
+                type: integer
+                example: 12
+    RespawningError:
+      description: Action rejected due to active despawn cooldown.
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              error:
+                type: string
+                example: "respawning"
+              message:
+                type: string
+                example: "You are currently respawning. Please wait 4 seconds."
+              seconds_remaining:
+                type: integer
+                example: 4
+    SignalInterferenceError:
+      description: Signal transmission interrupted by environmental crystal resonance or tactical ECM jamming. Zero action tokens consumed. Retryable.
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              error:
+                type: string
+                example: "Signal transmission interrupted by environmental crystal resonance or tactical ECM jamming"
+              code:
+                type: string
+                example: "signal_interference"
+              retryable:
+                type: boolean
+                example: true
+              interference:
+                type: object
+                properties:
+                  reason:
+                    type: string
+                    example: "Environmental crystal resonance and hostile ECM jamming"
+                  chance:
+                    type: number
+                    format: float
+                    example: 6.5
+
+  schemas:
+    LeaderboardEntry:
+      type: object
+      required:
+        - id
+        - name
+        - wealth
+        - extractions
+        - despawns
+        - ed_rate
+        - cpe
+        - status
+      properties:
+        id:
+          type: integer
+          example: 42
+        name:
+          type: string
+          example: "sentinel_alpha"
+        wealth:
+          type: integer
+          example: 125000
+        extractions:
+          type: integer
+          example: 12
+        despawns:
+          type: integer
+          example: 2
+        ed_rate:
+          type: number
+          format: float
+          example: 6.0
+        cpe:
+          type: number
+          format: float
+          description: Average credits extracted per run over recent extractions.
+          example: 1250.5
+        status:
+          type: string
+          enum: [active, inactive, despawned]
+          description: Player deployment activity status badge.
+          example: "active"
+
+    GameStateResponse:
+      type: object
+      required:
+        - player
+        - zone
+        - current_tile
+        - action_limiter
+        - boss_aura
+      properties:
+        player:
+          $ref: '#/components/schemas/PlayerProfile'
+        zone:
+          $ref: '#/components/schemas/ZoneMetadata'
+        world:
+          $ref: '#/components/schemas/WorldMetadata'
+        current_tile:
+          $ref: '#/components/schemas/TileDetails'
+        operator:
+          $ref: '#/components/schemas/OperatorSummary'
+        action_limiter:
+          $ref: '#/components/schemas/ActionLimiterStatus'
+        boss_aura:
+          type: boolean
+          description: Indicates if a Boss is within 1 tile of the player.
+          example: false
+        boss_coordinates:
+          $ref: '#/components/schemas/BossCoordinates'
+        combat_log:
+          type: array
+          items:
+            type: string
+          description: Optional list of logs generated by recent hostile actions.
+
+    MoveResponse:
+      type: object
+      required:
+        - zone
+        - tile
+        - current_tile
+        - surroundings
+        - action_limiter
+        - boss_aura
+      properties:
+        zone:
+          type: array
+          items:
+            type: integer
+          minItems: 2
+          maxItems: 2
+          example: [0, 0]
+        tile:
+          type: array
+          items:
+            type: integer
+          minItems: 2
+          maxItems: 2
+          example: [1, 2]
+        current_tile:
+          $ref: '#/components/schemas/TileDetails'
+        surroundings:
+          $ref: '#/components/schemas/Surroundings'
+        action_limiter:
+          $ref: '#/components/schemas/ActionLimiterStatus'
+        boss_aura:
+          type: boolean
+          description: Indicates if a Boss is within 1 tile of the player.
+          example: false
+        boss_coordinates:
+          $ref: '#/components/schemas/BossCoordinates'
+        combat_log:
+          type: array
+          items:
+            type: string
+        free_move:
+          type: boolean
+          description: "Indicates whether this movement step was free (0 action tokens consumed), via extraction vector advance or chassis thrusters proc."
+          example: true
+        free_move_reason:
+          type: string
+          description: "Reason for the free move ('extraction_vector' or 'thrusters_proc')."
+          example: "extraction_vector"
+
+    PlayerProfile:
+      type: object
+      required:
+        - username
+        - hp
+        - max_hp
+        - atk
+        - def
+        - move
+        - loot
+        - damage
+        - loadout_points
+        - despawns
+        - inventory
+        - carried_artifacts
+        - banked_artifacts
+        - banked_resources
+        - shield
+        - en
+        - max_en
+        - equipped_weapon
+        - equipped_armor
+        - equipped_utility
+        - spawned
+      properties:
+        username:
+          type: string
+          example: "player_one"
+        zone:
+          type: array
+          nullable: true
+          items:
+            type: integer
+          example: [0, 0]
+        tile:
+          type: array
+          nullable: true
+          items:
+            type: integer
+          example: [0, 0]
+        hp:
+          type: integer
+          example: 100
+        max_hp:
+          type: integer
+          example: 100
+        shield:
+          type: integer
+          example: 0
+        en:
+          type: integer
+          example: 50
+        max_en:
+          type: integer
+          example: 50
+        atk:
+          type: integer
+          example: 5
+        def:
+          type: integer
+          example: 5
+        move:
+          type: integer
+          example: 1
+        loot:
+          type: integer
+          example: 1
+        damage:
+          type: integer
+          example: 20
+        loadout_points:
+          type: integer
+          example: 0
+        despawns:
+          type: integer
+          example: 0
+        spawned:
+          type: boolean
+          example: true
+        equipped_weapon:
+          type: string
+          example: "plasma_beam"
+        equipped_armor:
+          type: string
+          example: "bonded_carbon"
+        equipped_utility:
+          type: string
+          example: "laz_excavator"
+        inventory:
+          type: object
+          additionalProperties:
+            type: integer
+          example:
+            scrap: 4
+            iron: 2
+        carried_artifacts:
+          type: array
+          items:
+            type: object
+          example: []
+        banked_artifacts:
+          type: array
+          items:
+            type: object
+          example: []
+        banked_resources:
+          type: object
+          additionalProperties:
+            type: integer
+          example:
+            scrap: 50
+            copper: 12
+
+    WorldMetadata:
+      type: object
+      required:
+        - world_size
+        - zone_size
+        - extraction_zones
+      properties:
+        world_size:
+          type: integer
+          example: 10
+        zone_size:
+          type: integer
+          example: 10
+        extraction_zones:
+          type: array
+          items:
+            type: array
+            items:
+              type: integer
+          example: [[4, 4], [4, 5], [5, 4], [5, 5]]
+
+    ZoneMetadata:
+      type: object
+      required:
+        - coords
+        - is_extraction_zone
+        - distance_to_center
+        - risk_multiplier
+      properties:
+        coords:
+          type: array
+          items:
+            type: integer
+          example: [0, 0]
+        is_extraction_zone:
+          type: boolean
+          example: false
+        distance_to_center:
+          type: integer
+          example: 4
+        risk_multiplier:
+          type: number
+          example: 1.0
+        threat_ring:
+          type: string
+          example: "fringe"
+          description: "Concentric threat ring identifier based on Manhattan distance to center (ring_0, exclusion_ring, fortified_reaches, fringe)."
+        threat_ring_label:
+          type: string
+          example: "Fringe"
+          description: "Human-readable label for the concentric threat ring."
+
+    TileDetails:
+      type: object
+      required:
+        - crystal_depth
+        - terrain_name
+        - players
+        - enemies
+        - resources
+      properties:
+        crystal_depth:
+          type: integer
+          example: 42
+          description: "Deterministic terrain crystal depth percentage (0-99) of the tile."
+        terrain_name:
+          type: string
+          example: "Crystalline Rubble"
+          description: "Descriptive terrain modifier classification based on crystal depth."
+        threat_ring:
+          type: string
+          example: "fringe"
+          description: "Concentric threat ring identifier based on Manhattan distance to center."
+        threat_ring_label:
+          type: string
+          example: "Fringe"
+          description: "Human-readable label for the concentric threat ring."
+        risk_multiplier:
+          type: number
+          example: 1.0
+          description: "Threat risk multiplier scaling hostile stats and loot."
+        players:
+          type: array
+          items:
+            $ref: '#/components/schemas/PresentPlayer'
+        enemies:
+          type: array
+          description: "List of hostiles present on the tile, sorted by role priority (mega_boss, sub_boss, standard, add)."
+          items:
+            $ref: '#/components/schemas/PresentEnemy'
+        resources:
+          type: array
+          items:
+            $ref: '#/components/schemas/PresentResource'
+
+    PresentPlayer:
+      type: object
+      required:
+        - user_id
+        - username
+      properties:
+        user_id:
+          type: integer
+          example: 2
+        username:
+          type: string
+          example: "rival_bot"
+
+    PresentEnemy:
+      type: object
+      required:
+        - id
+        - type
+        - hp
+        - max_hp
+        - atk
+        - def
+        - hostility
+        - agro
+        - role
+        - is_boss
+      properties:
+        id:
+          type: string
+          example: "enemy_3a2b"
+        type:
+          type: string
+          example: "scout_drone"
+        enemy_type:
+          type: string
+          example: "scout_drone"
+        name:
+          type: string
+          example: "Singing Sentinel"
+        role:
+          type: string
+          enum: ["mega_boss", "sub_boss", "standard", "add"]
+          example: "standard"
+          description: "Tactical encounter role of the hostile."
+        is_boss:
+          type: boolean
+          example: false
+          description: "Indicates whether the entity is a Mega Boss or Regional Sub-Boss."
+        category:
+          type: string
+          example: "crystalline"
+        description:
+          type: string
+          example: "A native silicate organism synthesized from high-density crystal deposits."
+        hp:
+          type: integer
+          example: 15
+        max_hp:
+          type: integer
+          example: 15
+        atk:
+          type: integer
+          example: 3
+        def:
+          type: integer
+          example: 3
+        damage:
+          type: integer
+          example: 5
+          description: "Base counterattack damage dealt before defense mitigation."
+        hostility:
+          type: number
+          example: 0.15
+        agro:
+          type: boolean
+          example: false
+        boss:
+          type: boolean
+          example: false
+        statuses:
+          type: object
+          additionalProperties:
+            type: integer
+          description: "Active tactical combat status effects on this enemy and their remaining duration."
+
+    PresentResource:
+      type: object
+      required:
+        - type
+        - quantity
+      properties:
+        type:
+          type: string
+          example: "scrap"
+        quantity:
+          type: integer
+          example: 3
+
+    LootedResource:
+      type: object
+      required:
+        - type
+        - quantity
+      properties:
+        type:
+          type: string
+          example: "scrap"
+        quantity:
+          type: integer
+          example: 3
+
+    ActionLimiterStatus:
+      type: object
+      required:
+        - tokens
+        - capacity
+        - seconds_until_refill
+      properties:
+        tokens:
+          type: number
+          example: 98
+        capacity:
+          type: integer
+          example: 100
+        seconds_until_refill:
+          type: integer
+          example: 12
+
+    Surroundings:
+      type: object
+      description: Sensor readings of the 8 adjacent tile directions inside the current zone. Out-of-zone boundaries return a status of outside.
+      properties:
+        n:
+          $ref: '#/components/schemas/DirectionScan'
+        ne:
+          $ref: '#/components/schemas/DirectionScan'
+        e:
+          $ref: '#/components/schemas/DirectionScan'
+        se:
+          $ref: '#/components/schemas/DirectionScan'
+        s:
+          $ref: '#/components/schemas/DirectionScan'
+        sw:
+          $ref: '#/components/schemas/DirectionScan'
+        w:
+          $ref: '#/components/schemas/DirectionScan'
+        nw:
+          $ref: '#/components/schemas/DirectionScan'
+
+    DirectionScan:
+      type: object
+      required:
+        - status
+      properties:
+        status:
+          type: string
+          enum: [inside, outside]
+          example: "inside"
+        players:
+          type: integer
+          description: Total number of players detected in this direction.
+          example: 0
+        enemies:
+          type: integer
+          description: Total number of enemies detected in this direction.
+          example: 1
+
+    BossCoordinates:
+      type: object
+      nullable: true
+      description: The global coordinates of the active Boss.
+      required:
+        - zone
+        - tile
+      properties:
+        zone:
+          type: array
+          items:
+            type: integer
+          minItems: 2
+          maxItems: 2
+          example: [2, 2]
+        tile:
+          type: array
+          items:
+            type: integer
+          minItems: 2
+          maxItems: 2
+          example: [4, 4]
+
+    PaginationInfo:
+      type: object
+      properties:
+        page:
+          type: integer
+          example: 1
+        limit:
+          type: integer
+          example: 25
+        total_items:
+          type: integer
+          example: 1245
+        total_pages:
+          type: integer
+          example: 50
+
+    UpdateOperatorRequest:
+      type: object
+      properties:
+        callsign:
+          type: string
+          description: "Unique Operator callsign (2-24 chars: letters, numbers, periods, underscores, dashes, spaces)."
+          example: "Vesper-7"
+        origin:
+          type: string
+          enum: [ceres_relay, jovian_fleet, kuiper_archive, vesta_yards]
+          example: "ceres_relay"
+        bio:
+          type: string
+          maxLength: 280
+          example: "Remote drone commander specializing in deep-core Vault extraction."
+
+    OperatorSummary:
+      type: object
+      description: Lightweight Operator summary included in `GET /api/game/state`.
+      required:
+        - id
+        - callsign
+        - origin
+        - title
+        - line_levels
+        - sp_available_total
+        - mastery_claimable
+        - mastery_order
+        - active_modifiers
+      properties:
+        id:
+          type: integer
+          example: 1
+        callsign:
+          type: string
+          example: "Vesper-7"
+        origin:
+          type: string
+          example: "ceres_relay"
+        title:
+          type: string
+          example: "Relic Runner"
+        line_levels:
+          type: object
+          additionalProperties:
+            type: integer
+          example:
+            vanguard: 3
+            pilot: 6
+            archaeologist: 6
+            mechanic: 2
+        sp_available_total:
+          type: integer
+          example: 2
+        mastery_claimable:
+          type: boolean
+          example: false
+        mastery_order:
+          type: array
+          items:
+            type: string
+          example: []
+        active_modifiers:
+          type: object
+          additionalProperties: true
+
+    OperatorSheet:
+      type: object
+      description: Complete Operator Character Sheet returned by `/api/game/operator*`.
+      required:
+        - id
+        - user_id
+        - callsign
+        - origin
+        - bio
+        - title
+        - mastery_order
+        - accomplishments
+        - unlocked_skills
+        - skill_lines
+        - active_modifiers
+      properties:
+        id:
+          type: integer
+          example: 1
+        user_id:
+          type: integer
+          example: 1
+        callsign:
+          type: string
+          example: "Vesper-7"
+        origin:
+          type: string
+          example: "ceres_relay"
+        origins_catalog:
+          type: array
+          items:
+            type: object
+        bio:
+          type: string
+          example: "Remote drone commander specializing in deep-core Vault extraction."
+        title:
+          type: string
+          example: "Relic Runner"
+        mastery_order:
+          type: array
+          items:
+            type: string
+          example: ["pilot"]
+        accomplishments:
+          type: object
+          additionalProperties:
+            type: integer
+        unlocked_skills:
+          type: object
+          additionalProperties:
+            type: integer
+        skill_lines:
+          type: object
+          additionalProperties:
+            type: object
+        active_modifiers:
+          type: object
+          additionalProperties: true
